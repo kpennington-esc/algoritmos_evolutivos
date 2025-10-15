@@ -12,4 +12,4 @@ La notebook es solo el script pegado
 
 Habria que armarla bien
 
-Ver si es posible introducir variaciones en la pista
+Ver si es posible introducir variaciones en la pista 

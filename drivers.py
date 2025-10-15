@@ -2,11 +2,10 @@ import numpy as np
 from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 from math import cos, sin, atan2, pi, sqrt
-%matplotlib widget
 
 # ========== CONSTANTS ==========
-W, H = 200, 200
-MAX_SENSOR_RANGE = 80.0 # how far the sensors can see
+W, H = 400, 200
+MAX_SENSOR_RANGE = 60.0 # how far the sensors can see
 SENSOR_ANGLES = [-0.35, 0.0, 0.35] # radians relative to car heading
 DT = 1.0 # time step in seconds
 MAX_SPEED = 320.0 # units per second
@@ -14,8 +13,8 @@ MAX_STEER_RATE = 0.20
 
 # GA parameters
 POP_SIZE = 40
-GENERATIONS = 3
-TOURNAMENT = 4 
+GENERATIONS = 200
+TOURNAMENT = 6 
 CROSSOVER_RATE = 0.7
 MUTATION_STD = 0.2
 MUTATION_STEP = 0.1
@@ -54,12 +53,65 @@ def make_ring_track(W, H, cx, cy, outer_rx, outer_ry, inner_rx, inner_ry):
     mask = np.array(img, dtype=np.uint8)
     return mask
 
+def generate_wiggly_ellipse(num_points=100000, width=20, wiggles=3, amp=0.2):
+    t = np.linspace(0, 2*np.pi, num_points, endpoint=False)
+    a, b = 140, 65  # semi-axes
+    
+    # sinusoidal radial perturbation
+    r = 1 + amp * np.sin(wiggles * t)
+    x = a * r * np.cos(t) + W/2
+    y = b * r * np.sin(t) + H/2
+    return np.stack([x, y], axis=1), width
+    
+def make_track_mask(track, width):
+    mask = Image.new("L", (W, H), 0)
+    draw = ImageDraw.Draw(mask)
+    pts = [tuple(p) for p in track]
+    draw.line(pts + [pts[0]], fill=1, width=width)
+    return np.array(mask) > 0
 
-track_mask = make_ring_track(W, H, cx, cy, outer_rx, outer_ry, inner_rx,
-                             inner_ry)
+def compute_geometry(track):
+    diffs = np.diff(track, axis=0, append=track[:1])
+    seg_lengths = np.linalg.norm(diffs, axis=1)
+    s = np.cumsum(seg_lengths)
+    s -= s[0]
+    prev = np.roll(track, 1, axis=0)
+    nxt = np.roll(track, -1, axis=0)
+    a = np.linalg.norm(track - prev, axis=1)
+    b = np.linalg.norm(track - nxt, axis=1)
+    c = np.linalg.norm(nxt - prev, axis=1)
+    area = 0.5 * np.abs(
+        (prev[:,0]*(track[:,1]-nxt[:,1]) +
+         track[:,0]*(nxt[:,1]-prev[:,1]) +
+         nxt[:,0]*(prev[:,1]-track[:,1]))
+    )
+    kappa = 4 * area / (a * b * c + 1e-8)
+    return s, kappa
+    
+track, width = generate_wiggly_ellipse(wiggles=4, amp=0.30)
+mask = make_track_mask(track, width)
+s, kappa = compute_geometry(track)
+
+# track, width = generate_wiggly_ellipse(wiggles=4, amp=0.25)
+track_mask = make_track_mask(track, width)
+s, kappa = compute_geometry(track)
 center_rx = (outer_rx + inner_rx) / 2.0
 center_ry = (outer_ry + inner_ry) / 2.0
 center_R = (center_rx + center_ry) / 2.0
+
+
+x = track[0,0]
+y =  track[0,1]
+x_1 = track[1,0]
+y_1 =  track[0,1]
+plt.figure(figsize=(6,6))
+plt.scatter(x,y, marker='s', color='g')
+plt.imshow(track_mask, cmap='gray', origin='upper')
+plt.plot(track[:,0], track[:,1], 'r--', linewidth=1)
+plt.axis('equal')
+plt.title('Wiggly ellipse track')
+plt.show()
+
 
 
 def in_track(x, y):
@@ -153,8 +205,6 @@ def calculate_net_progress(trace):
     progress_percent += laps_completed * 100.0
 
     return progress_percent, laps_completed, direction, total_distance
-# --------------------------------------------------------------------
-
 
 
 # ========== NEURAL NETWORK ==========
@@ -180,12 +230,12 @@ def forward_network(genome, inputs):
     out = np.dot(h, w2) + b2
 
     # output layer activation
-    steer = np.tanh(out[0])  # * 0.8 # tanh -1 to 1 scaled to -0.8 to 0.8
+    steer = np.tanh(out[0]) *  0.8 # tanh -1 to 1 scaled to -0.8 to 0.8
     accel = 1.0 / (1.0 + np.exp(-out[1]))  # sigmoid 0-1
     brake = 1.0 / (1.0 + np.exp(-out[2]))  # sigmoid 0-1
 
-    if accel > 0.7 and brake > 0.7:
-        brake = 0.3
+    # if accel > 0.7 and brake > 0.7:
+    #     brake = 0.3
 
     return steer, accel, brake
 
@@ -198,15 +248,23 @@ def simulate_one(genome, max_steps=1000, sensor_step=4.0, return_trace=False,
     or crash.
     Returns final position, trace, crash status, and controls data.
     """
-    theta = -pi # start angled left
-    r = (center_rx + center_ry) / 2.0 # start radius
-    x = cx + r * cos(theta)
-    y = cy + r * sin(theta)
-    heading = theta + pi / 2 # tangent to circle
+    # theta = -pi # start angled left
+    # r = (center_rx + center_ry) / 2.0 # start radius
+    # x = cx + r * cos(theta)
+    # y = cy + r * sin(theta)
+    # heading = theta + pi / 2 # tangent to circle
+    # speed = 0.0
+    # trace = [(x, y)]
+    # controls_data = []
+    cx, cy = track.mean(axis=0)
+    # start near the first point
+    x, y = track[0]
+    heading = atan2(track[1,1] - track[0,1], track[1,0] - track[0,0])
     speed = 0.0
     trace = [(x, y)]
     controls_data = []
 
+    
     # race!
     for step in range(max_steps):
         sensor = sensor_distances_fast(x, y, heading, step=sensor_step)
@@ -233,7 +291,7 @@ def simulate_one(genome, max_steps=1000, sensor_step=4.0, return_trace=False,
                  })
 
         # physics
-        steer_rate = steer * MAX_STEER_RATE
+        steer_rate = steer * MAX_STEER_RATE 
         heading += steer_rate * DT
         accel_force = accel * 2.2
         brake_force = brake * 2.8
@@ -401,8 +459,8 @@ stagnation_counter = 0
 current_mutation_std = MUTATION_STD
 
 print("Starting evolution...")
-print("Gen | Best Fitness | Progress% | Laps | Dir | Distance | Status | MutRate")
-print("----|--------------|-----------|------|-----|----------|--------|--------")
+print("Gen | Best Fitness |  Progress% |  Laps | Dir | Distance | Status | MutRate")
+print("----|--------------|------------|-------|-----|----------|--------|--------")
 
 
 for gen in range(GENERATIONS):
@@ -439,7 +497,7 @@ for gen in range(GENERATIONS):
         print(f" Stagnation detected ({stagnation_counter} gens) → Mutation std increased to {current_mutation_std:.2f}")
 
     print(
-        f"{gen + 1:3d} | {best_val:12.0f} | {best_progress:9.1f}% | {best_laps:5d} | {direction_symbol}  | {best_distance:9.0f} | {status:5} | {current_mutation_std:.2f} {new_best_marker}"
+        f"{gen + 1:3d} | {best_val:12.0f} | {best_progress:9.1f}% | {best_laps:5d} |  {direction_symbol}  | {best_distance:9.0f} | {status:5} | {current_mutation_std:.2f} {new_best_marker}"
     )
 
 
@@ -504,4 +562,3 @@ plt.tight_layout()
 plt.show()
 if best_controls_overall:
     plot_controls(best_controls_overall, title="Best Driver Control Inputs Over Time")
-
