@@ -13,7 +13,7 @@ MAX_STEER_RATE = 0.20
 
 # GA parameters
 POP_SIZE = 40
-GENERATIONS = 200
+GENERATIONS = 100
 TOURNAMENT = 6 
 CROSSOVER_RATE = 0.7
 MUTATION_STD = 0.2
@@ -89,12 +89,9 @@ def compute_geometry(track):
     return s, kappa
     
 track, width = generate_wiggly_ellipse(wiggles=4, amp=0.30)
-mask = make_track_mask(track, width)
-s, kappa = compute_geometry(track)
-
-# track, width = generate_wiggly_ellipse(wiggles=4, amp=0.25)
 track_mask = make_track_mask(track, width)
 s, kappa = compute_geometry(track)
+
 center_rx = (outer_rx + inner_rx) / 2.0
 center_ry = (outer_ry + inner_ry) / 2.0
 center_R = (center_rx + center_ry) / 2.0
@@ -114,7 +111,7 @@ plt.show()
 
 
 
-def in_track(x, y):
+def in_track(x, y, trck_msk):
     """
     This is a naive check, but works fine for our simple track.
     """
@@ -122,10 +119,10 @@ def in_track(x, y):
     yi = int(round(y))
     if xi < 0 or yi < 0 or xi >= W or yi >= H:
         return False
-    return track_mask[yi, xi] == 1
+    return trck_msk[yi, xi] == 1
 
 
-def sensor_distances_fast(x, y, heading, step=4.0):
+def sensor_distances_fast(x, y, heading, trck_msk, step=4.0):
     """
     Calculate distances to track edges for each sensor angle.
     Uses a step size to incrementally check along the ray until hitting
@@ -141,7 +138,7 @@ def sensor_distances_fast(x, y, heading, step=4.0):
             dist = i * step
             sx = x + dist * cos(ray_ang)
             sy = y + dist * sin(ray_ang)
-            if not (0 <= sx < W and 0 <= sy < H) or not in_track(sx, sy):
+            if not (0 <= sx < W and 0 <= sy < H) or not in_track(sx, sy, trck_msk):
                 hit_dist = dist
                 break
         dists.append(min(hit_dist, MAX_SENSOR_RANGE))
@@ -241,7 +238,7 @@ def forward_network(genome, inputs):
 
 
 # ========== SIMULATION ==========
-def simulate_one(genome, max_steps=1000, sensor_step=4.0, return_trace=False,
+def simulate_one(genome, trck_msk, max_steps=1000, sensor_step=4.0, return_trace=False,
                  return_controls=False):
     """
     Simulate one car controlled by the given genome, from start until max_steps
@@ -267,7 +264,7 @@ def simulate_one(genome, max_steps=1000, sensor_step=4.0, return_trace=False,
     
     # race!
     for step in range(max_steps):
-        sensor = sensor_distances_fast(x, y, heading, step=sensor_step)
+        sensor = sensor_distances_fast(x, y, heading, trck_msk, step=sensor_step)
         tangent = atan2(y - cy, x - cx) + pi / 2
         rel_angle = ((heading - tangent) + pi) % (2 * pi) - pi
         speed_norm = speed / MAX_SPEED
@@ -308,7 +305,7 @@ def simulate_one(genome, max_steps=1000, sensor_step=4.0, return_trace=False,
             trace.append((x, y))
 
         # crash check
-        if not (0 <= x < W and 0 <= y < H) or not in_track(x, y):
+        if not (0 <= x < W and 0 <= y < H) or not in_track(x, y, trck_msk):
             return None, (
                 trace if return_trace else None), True, None, controls_data
 
@@ -316,7 +313,7 @@ def simulate_one(genome, max_steps=1000, sensor_step=4.0, return_trace=False,
 
 
 # ========== FITNESS FUNCTION ==========
-def evaluate_pop_fitness(pop):
+def evaluate_pop_fitness(pop, trck_msk):
     """
     Evaluate fitness of the entire population. Returns fitness array and progress data for monitoring.
     1. simulate each individual
@@ -328,7 +325,7 @@ def evaluate_pop_fitness(pop):
     progress_data = []  
 
     for i, ind in enumerate(pop):
-        _, trace, crashed, _, _ = simulate_one(ind, max_steps=1000,
+        _, trace, crashed, _, _ = simulate_one(ind,trck_msk, max_steps=1000,
                                                return_trace=True)
 
         if not trace or len(trace) < 10:
@@ -448,6 +445,178 @@ def plot_controls(controls_data, title="Control Inputs Over Time"):
     plt.show()
 
 
+def plot_historical_trajectories(historical_bests, track_mask, max_display=5):
+    """Plot trajectories from different generations to show improvement over time"""
+    if not historical_bests:
+        print("No historical data to plot")
+        return
+    
+    # select a subset of generations to display (evenly spaced + final)
+    n_bests = len(historical_bests)
+    if n_bests <= max_display:
+        selected_indices = list(range(n_bests))
+    else:
+        # select evenly spaced indices including first and last
+        step = n_bests // (max_display - 1)
+        selected_indices = [0] + [i * step for i in range(1, max_display - 1)] + [n_bests - 1]
+        selected_indices = sorted(list(set(selected_indices)))  
+    
+    plt.figure(figsize=(12, 8))
+    plt.imshow(track_mask, origin='lower', alpha=0.7, cmap='gray')
+    
+    # cmap for different generations
+    import matplotlib.cm as cm
+    colors = cm.get_cmap('plasma')(np.linspace(0, 1, len(selected_indices)))
+    
+    for i, idx in enumerate(selected_indices):
+        best = historical_bests[idx]
+        if best['trace']:
+            tx = [p[0] for p in best['trace']]
+            ty = [p[1] for p in best['trace']]
+            
+            plt.plot(tx, ty, color=colors[i], linewidth=2, alpha=0.8,
+                    label=f"Gen {best['generation']}: {best['fitness']:.0f} fitness")
+
+            # start and end points
+            plt.scatter(tx[0], ty[0], color=colors[i], marker='o', s=50, edgecolor='white')
+            plt.scatter(tx[-1], ty[-1], color=colors[i], marker='s', s=50, edgecolor='white')
+    
+    plt.title('Historical Trajectory Improvements')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_historical_speed_comparison(historical_bests, max_display=3):
+    """Compare speed profiles across different generations"""
+    if not historical_bests:
+        print("No historical data to plot")
+        return
+
+    # compare up to three generations
+    n_bests = len(historical_bests)
+    if n_bests == 1:
+        selected_indices = [0]
+    elif n_bests == 2:
+        selected_indices = [0, 1]
+    else:
+        selected_indices = [0, n_bests // 2, n_bests - 1]
+    
+    plt.figure(figsize=(15, 5))
+    
+    for i, idx in enumerate(selected_indices):
+        best = historical_bests[idx]
+        if best['controls']:
+            plt.subplot(1, len(selected_indices), i + 1)
+            
+            steps = [c['step'] for c in best['controls']]
+            speeds = [c['speed'] for c in best['controls']]
+            
+            plt.plot(steps, speeds, 'b-', linewidth=2)
+            plt.title(f"Gen {best['generation']}\nFitness: {best['fitness']:.0f}")
+            plt.xlabel('Simulation Step')
+            plt.ylabel('Speed')
+            plt.grid(True)
+            plt.ylim(0, MAX_SPEED)
+    
+    plt.suptitle('Speed Evolution Across Generations', fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_historical_controls_comparison(historical_bests, max_display=3):
+    """Compare control inputs across different generations"""
+    if not historical_bests:
+        print("No historical data to plot")
+        return
+    
+    n_bests = len(historical_bests)
+    if n_bests == 1:
+        selected_indices = [0]
+    elif n_bests == 2:
+        selected_indices = [0, 1]
+    else:
+        selected_indices = [0, n_bests // 2, n_bests - 1]
+    
+    fig, axes = plt.subplots(3, len(selected_indices), figsize=(15, 10))
+    if len(selected_indices) == 1:
+        axes = axes.reshape(-1, 1)
+    
+    for i, idx in enumerate(selected_indices):
+        best = historical_bests[idx]
+        if best['controls']:
+            steps = [c['step'] for c in best['controls']]
+            steer = [c['steer'] for c in best['controls']]
+            accel = [c['accel'] for c in best['controls']]
+            brake = [c['brake'] for c in best['controls']]
+            
+            # steering
+            axes[0, i].plot(steps, steer, 'b-', linewidth=2)
+            axes[0, i].set_title(f"Gen {best['generation']} - Steering")
+            axes[0, i].set_ylabel('Steering')
+            axes[0, i].set_ylim(-1, 1)
+            axes[0, i].grid(True)
+            
+            # throttle and brake
+            axes[1, i].plot(steps, accel, 'g-', label='Throttle', linewidth=2)
+            axes[1, i].plot(steps, brake, 'r-', label='Brake', linewidth=2)
+            axes[1, i].set_title(f"Gen {best['generation']} - Throttle/Brake")
+            axes[1, i].set_ylabel('Input')
+            axes[1, i].set_ylim(0, 1)
+            axes[1, i].legend()
+            axes[1, i].grid(True)
+            
+            # speed
+            speeds = [c['speed'] for c in best['controls']]
+            axes[2, i].plot(steps, speeds, 'purple', linewidth=2)
+            axes[2, i].set_title(f"Gen {best['generation']} - Speed")
+            axes[2, i].set_xlabel('Simulation Step')
+            axes[2, i].set_ylabel('Speed')
+            axes[2, i].grid(True)
+    
+    plt.suptitle('Control Evolution Across Generations', fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_improvement_timeline(historical_bests):
+    """Plot the timeline of fitness improvements"""
+    if not historical_bests:
+        print("No historical data to plot")
+        return
+    
+    generations = [best['generation'] for best in historical_bests]
+    fitnesses = [best['fitness'] for best in historical_bests]
+    progresses = [best['progress'] for best in historical_bests]
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+
+    # fitness timeline
+    ax1.plot(generations, fitnesses, 'bo-', linewidth=2, markersize=8)
+    ax1.set_xlabel('Generation')
+    ax1.set_ylabel('Fitness')
+    ax1.set_title('Fitness Improvements Over Time')
+    ax1.grid(True)
+    
+    # annotations for major improvements
+    for i, (gen, fit) in enumerate(zip(generations, fitnesses)):
+        if i == 0 or i == len(generations) - 1 or fit - fitnesses[i-1] > 1000:
+            ax1.annotate(f'{fit:.0f}', (gen, fit), 
+                        xytext=(5, 5), textcoords='offset points',
+                        fontsize=9, alpha=0.8)
+    
+    # track progress timeline
+    ax2.plot(generations, progresses, 'go-', linewidth=2, markersize=8)
+    ax2.set_xlabel('Generation')
+    ax2.set_ylabel('Track Progress (%)')
+    ax2.set_title('Track Progress Over Time')
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+
+
 # ========== MAIN EVOLUTION ==========
 population = create_population(POP_SIZE)
 best_history, mean_history = [], []
@@ -458,13 +627,15 @@ best_genome_overall = None
 stagnation_counter = 0
 current_mutation_std = MUTATION_STD
 
+historical_bests = []  # List of (generation, fitness, genome, trace, controls)
+
 print("Starting evolution...")
 print("Gen | Best Fitness |  Progress% |  Laps | Dir | Distance | Status | MutRate")
 print("----|--------------|------------|-------|-----|----------|--------|--------")
 
 
 for gen in range(GENERATIONS):
-    fits, progress_data = evaluate_pop_fitness(population)
+    fits, progress_data = evaluate_pop_fitness(population, track_mask)
     mean_history.append(float(np.mean(fits)))
     best_idx = int(np.argmax(fits))
     best_val = float(fits[best_idx])
@@ -481,9 +652,22 @@ for gen in range(GENERATIONS):
     if is_new_best:
         best_fitness_overall = best_val
         best_genome_overall = population[best_idx].copy()
-        _, best_trace_overall, _, _, best_controls_overall = simulate_one(best_genome_overall,
+        _, best_trace_overall, _, _, best_controls_overall = simulate_one(best_genome_overall, track_mask,
                                                       max_steps=1000,
                                                       return_trace=True, return_controls=True)
+        
+        historical_bests.append({
+            'generation': gen + 1,
+            'fitness': best_val,
+            'genome': best_genome_overall.copy(),
+            'trace': best_trace_overall.copy() if best_trace_overall else None,
+            'controls': best_controls_overall.copy() if best_controls_overall else None,
+            'progress': best_progress,
+            'laps': best_laps,
+            'direction': best_direction,
+            'distance': best_distance
+        })
+        
         new_best_marker = "NEW BEST!"
         stagnation_counter = 0
         current_mutation_std = MUTATION_STD
@@ -547,18 +731,57 @@ plt.grid(True)
 
 plt.subplot(1, 2, 2)
 plt.imshow(track_mask, origin='lower')
-if best_trace_overall:
+if best_trace_overall and best_controls_overall:
+    tx = [p[0] for p in best_trace_overall]
+    ty = [p[1] for p in best_trace_overall]
+    
+    speeds = [c['speed'] for c in best_controls_overall]
+    
+    # colormap based on speed
+    # NOTE: we might have one less speed value than trace points
+    min_len = min(len(tx), len(speeds))
+    tx_plot = tx[:min_len]
+    ty_plot = ty[:min_len]
+    speeds_plot = speeds[:min_len]
+    
+    scatter = plt.scatter(tx_plot, ty_plot, c=speeds_plot, cmap='viridis', 
+                         s=10, alpha=0.8, label='Best Driver')
+    plt.colorbar(scatter, label='Speed')
+    
+    # we also add a line plot for the trajectory (optional, lighter)
+    plt.plot(tx, ty, 'k-', alpha=0.3, linewidth=1)
+
+elif best_trace_overall:
+    # if we dont have speed data, just plot the trajectory line
     tx = [p[0] for p in best_trace_overall]
     ty = [p[1] for p in best_trace_overall]
     plt.plot(tx, ty, 'r-', linewidth=2, label='Best Driver')
 
 plt.scatter([cx], [cy], marker='x', color='cyan', s=100)
-plt.scatter(tx[-1], ty[-1], marker='o', color='green', s=50, label='End Position')
+if best_trace_overall:
+    tx = [p[0] for p in best_trace_overall]
+    ty = [p[1] for p in best_trace_overall]
+    plt.scatter(tx[-1], ty[-1], marker='o', color='green', s=50, label='End Position')
 plt.axis('off')
 plt.title('Best Trajectory')
 plt.legend()
 
 plt.tight_layout()
 plt.show()
+
+# ========== HISTORICAL ANALYSIS ==========
+if historical_bests:
+    print(f"\nFound {len(historical_bests)} improvements during evolution:")
+    for i, best in enumerate(historical_bests):
+        print(f"  {i+1}. Gen {best['generation']}: {best['fitness']:.0f} fitness, {best['progress']:.1f}% progress")
+    
+    plot_improvement_timeline(historical_bests)
+    
+    plot_historical_trajectories(historical_bests, track_mask, max_display=5)
+    
+    plot_historical_speed_comparison(historical_bests, max_display=3)
+    
+    plot_historical_controls_comparison(historical_bests, max_display=3)
+
 if best_controls_overall:
-    plot_controls(best_controls_overall, title="Best Driver Control Inputs Over Time")
+    plot_controls(best_controls_overall, title="Final Best Driver Control Inputs Over Time")
