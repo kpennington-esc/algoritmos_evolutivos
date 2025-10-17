@@ -2,25 +2,17 @@ import numpy as np
 from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 from math import cos, sin, atan2, pi, sqrt
+import bisect
 
-# ========== CONSTANTS ==========
+rng = np.random.RandomState(24)
+
+# ========== CONSTANTS / PHYSICS ==========
 W, H = 400, 200
-MAX_SENSOR_RANGE = 60.0 # how far the sensors can see
+MAX_SENSOR_RANGE = 80.0 # how far the sensors can see
 SENSOR_ANGLES = [-0.35, 0.0, 0.35] # radians relative to car heading
 DT = 1.0 # time step in seconds
 MAX_SPEED = 320.0 # units per second
 MAX_STEER_RATE = 0.20 
-
-# GA parameters
-POP_SIZE = 40
-GENERATIONS = 100
-TOURNAMENT = 6 
-CROSSOVER_RATE = 0.7
-MUTATION_STD = 0.2
-MUTATION_STEP = 0.1
-MAX_MUTATION_STD = 1.0
-STAGNATION_LIMIT = 10
-rng = np.random.RandomState(24)
 
 # Track parameters
 cx, cy = W // 2, H // 2
@@ -35,6 +27,16 @@ OUTPUT_DIM = 3
 # Genome size!!
 NUM_WEIGHTS = INPUT_DIM * HIDDEN + HIDDEN + HIDDEN * OUTPUT_DIM + OUTPUT_DIM
 
+
+# GA DEFAULTS
+DEFAULT_POP_SIZE = 40 # drivers in each generation
+DEFAULT_GENERATIONS = 100 # total number of generations to simulate
+DEFAULT_TOURNAMENT = 6 # selected k for tournament selection
+DEFAULT_CROSSOVER_RATE = 0.7 # probability of crossover between parents
+DEFAULT_MUTATION_STD = 0.2 # range of mutation randomness
+MUTATION_STEP = 0.1 # increase mutation step on stagnation
+STAGNATION_LIMIT = 10 # increase mutation std when no new best occurs
+MAX_MUTATION_STD = 1
 
 # ========== TRACK CREATION ==========
 def make_ring_track(W, H, cx, cy, outer_rx, outer_ry, inner_rx, inner_ry):
@@ -53,17 +55,17 @@ def make_ring_track(W, H, cx, cy, outer_rx, outer_ry, inner_rx, inner_ry):
     mask = np.array(img, dtype=np.uint8)
     return mask
 
-def generate_wiggly_ellipse(num_points=100000, width=20, wiggles=3, amp=0.2):
+def generate_wiggly_ellipse(num_points=1000, width=20, wiggles=3, amp=0.2, W=400, H=200, semi_ax_x = 140, semi_ax_y=65):
     t = np.linspace(0, 2*np.pi, num_points, endpoint=False)
-    a, b = 140, 65  # semi-axes
+    a, b = semi_ax_x, semi_ax_y  # semi-axes
     
     # sinusoidal radial perturbation
-    r = 1 + amp * np.sin(wiggles * t)
+    r = 1 + amp * np.sin(wiggles * t) 
     x = a * r * np.cos(t) + W/2
     y = b * r * np.sin(t) + H/2
     return np.stack([x, y], axis=1), width
     
-def make_track_mask(track, width):
+def make_track_mask(track, width, W=400, H=200):
     mask = Image.new("L", (W, H), 0)
     draw = ImageDraw.Draw(mask)
     pts = [tuple(p) for p in track]
@@ -87,29 +89,98 @@ def compute_geometry(track):
     )
     kappa = 4 * area / (a * b * c + 1e-8)
     return s, kappa
-    
-track, width = generate_wiggly_ellipse(wiggles=4, amp=0.30)
-track_mask = make_track_mask(track, width)
-s, kappa = compute_geometry(track)
 
+def create_track(wiggles=4, amp=0.3, width=20, W=400, H=200, semi_ax_x=140, semi_ax_y=65):
+    plt.clf()
+    
+    track, track_width = generate_wiggly_ellipse(
+        num_points=100000, 
+        width=width, 
+        wiggles=wiggles, 
+        amp=amp,
+        W=W,
+        H=H,
+        semi_ax_x=semi_ax_x,
+        semi_ax_y=semi_ax_y
+    )
+    track_mask = make_track_mask(track, track_width, W, H)
+    s, kappa = compute_geometry(track)
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # plot track
+    x = track[0,0]
+    y = track[0,1]
+    ax1.scatter(x, y, marker='s', color='g', s=50, label='Start')
+    ax1.imshow(track_mask, cmap='gray', origin='upper', extent=[0, W, H, 0])
+    ax1.plot(track[:,0], track[:,1], 'r--', linewidth=1, alpha=0.7)
+    ax1.axis('equal')
+    ax1.set_title(f'Wiggly Ellipse Track\nWiggles: {wiggles}, Amplitude: {amp:.2f}')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    ax2.plot(s, kappa, 'b-', linewidth=2)
+    ax2.set_xlabel('Track Length')
+    ax2.set_ylabel('Curvature')
+    ax2.set_title('Track Curvature Profile')
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    return track_mask, track, kappa, s
+
+def create_fast_lookup(track, kappa, s, num_points=1000):
+    """Create uniformly sampled lookup for O(1) access"""
+    s_uniform = np.linspace(0, s[-1], num_points)
+    # Find closest original points for each uniform sample
+    kappa_uniform = np.zeros(num_points)
+    for i, s_val in enumerate(s_uniform):
+        idx = bisect.bisect_left(s, s_val) % len(s)
+        kappa_uniform[i] = kappa[idx]
+    
+    return s_uniform, kappa_uniform
+
+def create_fast_lookup(track, kappa, s, num_points=1000):
+    """Create uniformly sampled lookup for O(1) access"""
+    s_uniform = np.linspace(0, s[-1], num_points)
+    # Find closest original points for each uniform sample
+    kappa_uniform = np.zeros(num_points)
+    for i, s_val in enumerate(s_uniform):
+        idx = bisect.bisect_left(s, s_val) % len(s)
+        kappa_uniform[i] = kappa[idx]
+    
+    return s_uniform, kappa_uniform
+
+def verify_lookup_creation(track, kappa, s, s_lookup, kappa_lookup):
+    """Verify the lookup table has meaningful curvature values"""
+    print("=== Lookup Verification ===")
+    print(f"Original kappa range: [{np.min(kappa):.4f}, {np.max(kappa):.4f}]")
+    print(f"Lookup kappa range: [{np.min(kappa_lookup):.4f}, {np.max(kappa_lookup):.4f}]")
+    print(f"Lookup points with |kappa| > 0.1: {np.sum(np.abs(kappa_lookup) > 0.1)}/{len(kappa_lookup)}")
+    
+    # Check some sample points
+    sample_indices = [0, len(kappa_lookup)//4, len(kappa_lookup)//2, 3*len(kappa_lookup)//4]
+    for idx in sample_indices:
+        print(f"Lookup[{idx}]: s={s_lookup[idx]:.1f}, kappa={kappa_lookup[idx]:.4f}")
+    
+    # Plot to verify
+    plt.figure(figsize=(12, 4))
+    plt.subplot(1, 2, 1)
+    plt.plot(s, kappa, 'b-', alpha=0.7, label='Original')
+    plt.plot(s_lookup, kappa_lookup, 'ro', markersize=2, label='Lookup')
+    plt.title('Curvature: Original vs Lookup')
+    plt.legend()
+    
+    plt.subplot(1, 2, 2)
+    plt.hist(kappa_lookup, bins=50)
+    plt.title('Lookup Curvature Distribution')
+    plt.tight_layout()
+    plt.show()
+
+# use this for constant curvature 1/R (~ circular)
 center_rx = (outer_rx + inner_rx) / 2.0
 center_ry = (outer_ry + inner_ry) / 2.0
 center_R = (center_rx + center_ry) / 2.0
-
-
-x = track[0,0]
-y =  track[0,1]
-x_1 = track[1,0]
-y_1 =  track[0,1]
-plt.figure(figsize=(6,6))
-plt.scatter(x,y, marker='s', color='g')
-plt.imshow(track_mask, cmap='gray', origin='upper')
-plt.plot(track[:,0], track[:,1], 'r--', linewidth=1)
-plt.axis('equal')
-plt.title('Wiggly ellipse track')
-plt.show()
-
-
 
 def in_track(x, y, trck_msk):
     """
@@ -237,22 +308,40 @@ def forward_network(genome, inputs):
     return steer, accel, brake
 
 
+def find_nearest_track_point(x, y, track):
+    """Find the index of the nearest track point to current position"""
+    distances = np.linalg.norm(track - np.array([x, y]), axis=1)
+    return np.argmin(distances)
+
+def get_future_curvature(current_idx, track_length, kappa, lookahead_distance=20):
+    """Get average curvature looking ahead along the track"""
+    points_ahead = int(lookahead_distance) 
+    
+    future_idx = (current_idx + points_ahead) % len(kappa)
+    return kappa[future_idx]
+
+
+def get_curvature_lookup(x, y, prev_idx, s_lookup, kappa_lookup, conversion_factor, speed=0.0):
+    """O(1) curvature lookup using car's progress"""
+    # Estimate current arc length based on previous index + movement
+    current_lookup_idx = (prev_idx + 1) % len(s_lookup)
+    k_factor =0.3
+    if USE_ADAPTIVE_CURVATURE_LOOKUP:
+        lookahead_idx = int(current_lookup_idx + int(speed * k_factor)) % len(s_lookup)
+    else:
+        lookahead_idx = (current_lookup_idx + 10) % len(s_lookup)
+    
+    kappa_max = np.max(np.abs(kappa_lookup)) if np.any(kappa_lookup) else 1.0
+    return float(kappa_lookup[lookahead_idx]) / (kappa_max + 1e-8), current_lookup_idx
+
 # ========== SIMULATION ==========
-def simulate_one(genome, trck_msk, max_steps=1000, sensor_step=4.0, return_trace=False,
-                 return_controls=False):
+def simulate_one(genome, trck_msk, track, kappa, s, max_steps=1000, sensor_step=4.0, 
+                 return_trace=False, return_controls=False):
     """
     Simulate one car controlled by the given genome, from start until max_steps
     or crash.
     Returns final position, trace, crash status, and controls data.
     """
-    # theta = -pi # start angled left
-    # r = (center_rx + center_ry) / 2.0 # start radius
-    # x = cx + r * cos(theta)
-    # y = cy + r * sin(theta)
-    # heading = theta + pi / 2 # tangent to circle
-    # speed = 0.0
-    # trace = [(x, y)]
-    # controls_data = []
     cx, cy = track.mean(axis=0)
     # start near the first point
     x, y = track[0]
@@ -261,14 +350,33 @@ def simulate_one(genome, trck_msk, max_steps=1000, sensor_step=4.0, return_trace
     trace = [(x, y)]
     controls_data = []
 
+    # deprecated---------------
+    current_track_idx = 0 
+    total_track_length = s[-1]  
+    #--------------------------
     
     # race!
+    current_lookup_idx = 0
+
     for step in range(max_steps):
         sensor = sensor_distances_fast(x, y, heading, trck_msk, step=sensor_step)
-        tangent = atan2(y - cy, x - cx) + pi / 2
+        tangent = -atan2(track[current_lookup_idx+1,1] - track[current_lookup_idx,1],
+                track[current_lookup_idx+1,0] - track[current_lookup_idx,0])
+        # tangent = atan2(y - cy, x - cx) + pi / 2
         rel_angle = ((heading - tangent) + pi) % (2 * pi) - pi
         speed_norm = speed / MAX_SPEED
-        next_turn_curvature = 1.0 / max(1.0, center_R)
+        
+        # UPDATE: Use actual curvature from track geometry
+        # next_turn_curvature =1.0 / max(1.0, center_R)
+        # current_track_idx = find_nearest_track_point(x, y, track)
+        # next_turn_curvature = get_future_curvature(current_track_idx, s, kappa, lookahead_distance=MAX_SENSOR_RANGE)
+        
+        next_turn_curvature, current_lookup_idx = get_curvature_lookup(
+        x, y, current_lookup_idx, s_lookup, kappa_lookup, conversion_factor, speed=speed)
+        # next_turn_curvature =1.0 / max(1.0, center_R)
+
+        # Alternative: Use curvature at current position (more immediate)
+        # next_turn_curvature = kappa[current_track_idx]
 
         inputs = np.array(
             [sensor[0], sensor[1], sensor[2], speed_norm, rel_angle / pi,
@@ -284,17 +392,19 @@ def simulate_one(genome, trck_msk, max_steps=1000, sensor_step=4.0, return_trace
                 'speed': speed,
                 'sensor_left': sensor[0],
                 'sensor_center': sensor[1],
-                'sensor_right': sensor[2]
+                'sensor_right': sensor[2],
+                'curvature': next_turn_curvature, 
+                'track_idx': current_lookup_idx  
                  })
 
-        # physics
+        # physics (unchanged)
         steer_rate = steer * MAX_STEER_RATE 
         heading += steer_rate * DT
         accel_force = accel * 2.2
         brake_force = brake * 2.8
         speed += (accel_force - brake_force) * DT
-        speed *= 0.988
         speed = max(0.0, min(MAX_SPEED, speed))
+        speed *= 0.98
 
         # update position
         prev_x, prev_y = x, y
@@ -325,7 +435,7 @@ def evaluate_pop_fitness(pop, trck_msk):
     progress_data = []  
 
     for i, ind in enumerate(pop):
-        _, trace, crashed, _, _ = simulate_one(ind,trck_msk, max_steps=1000,
+        _, trace, crashed, _, _ = simulate_one(ind,trck_msk,track, kappa, s, max_steps=1000,
                                                return_trace=True)
 
         if not trace or len(trace) < 10:
@@ -342,7 +452,7 @@ def evaluate_pop_fitness(pop, trck_msk):
         # simple fitness: progress percentage
         fitness = progress_percent * 100 
 
-        # penalties# for going backwards and crashing
+        # penalties for going backwards and crashing
         if direction < 0:  # backwards
             fitness *= 0.1  # 90% penalty
         if crashed:
@@ -359,12 +469,12 @@ def evaluate_pop_fitness(pop, trck_msk):
 
 
 # ========== GENETIC ALGORITHM ==========
-def create_population(pop_size):
+def create_population(pop_size=DEFAULT_POP_SIZE):
     return rng.normal(scale=0.3, size=(pop_size, NUM_WEIGHTS)).astype(
         np.float32)
 
 
-def tournament_select(pop, fits, k=TOURNAMENT):
+def tournament_select(pop, fits, k=DEFAULT_TOURNAMENT):
     """
     tournament selection: pick k random individuals and return the best one.
     1. randomly select k indices from the population
@@ -379,21 +489,21 @@ def tournament_select(pop, fits, k=TOURNAMENT):
     return pop[best].copy()
 
 
-def crossover(p1, p2):
+def crossover(p1, p2, rate=DEFAULT_CROSSOVER_RATE):
     """
     uniform crossover: for each gene, randomly choose from one of the parents.
 
     """
-    if rng.rand() > CROSSOVER_RATE:
+    if rng.rand() > rate:
         return p1.copy(), p2.copy()
     alpha = rng.rand(NUM_WEIGHTS)
     return alpha * p1 + (1 - alpha) * p2, (1 - alpha) * p1 + alpha * p2
 
 
-def mutate(g, sigma=MUTATION_STD):
+def mutate(g, sigma=DEFAULT_MUTATION_STD):
     return g + rng.normal(scale=sigma, size=g.shape)
 
-
+# ========== PLOT FUNCTIONS ==========
 def plot_controls(controls_data, title="Control Inputs Over Time"):
     if not controls_data:
         print("No control data to plot")
@@ -404,10 +514,11 @@ def plot_controls(controls_data, title="Control Inputs Over Time"):
     accel = [c['accel'] for c in controls_data]
     brake = [c['brake'] for c in controls_data]
     speed = [c['speed'] for c in controls_data]
-    
+    curvature =[c['curvature'] for c in controls_data]
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
     
     ax1.plot(steps, steer, 'b-', linewidth=2)
+    ax1.plot(steps, curvature, 'r', linewidth=2) 
     ax1.set_ylabel('Steering (-1 to 1)')
     ax1.set_ylim(-1.1, 1.1)
     ax1.grid(True)
@@ -459,7 +570,7 @@ def plot_historical_trajectories(historical_bests, track_mask, max_display=5):
         # select evenly spaced indices including first and last
         step = n_bests // (max_display - 1)
         selected_indices = [0] + [i * step for i in range(1, max_display - 1)] + [n_bests - 1]
-        selected_indices = sorted(list(set(selected_indices)))  
+        selected_indices = sorted(list(set(selected_indices)), reverse=True)  
     
     plt.figure(figsize=(12, 8))
     plt.imshow(track_mask, origin='lower', alpha=0.7, cmap='gray')
@@ -616,172 +727,251 @@ def plot_improvement_timeline(historical_bests):
     plt.tight_layout()
     plt.show()
 
+def visualize_curvature_lookup(track, kappa, s, s_lookup, kappa_lookup, 
+                             current_s, lookahead_distance, current_pos=None):
+    """
+    Visualize the curvature lookup system
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    
+    ax1.plot(track[:, 0], track[:, 1], 'b-', alpha=0.7, linewidth=1, label='Track')
+    ax1.set_aspect('equal')
+    ax1.set_title('Track with Lookahead Position')
+    ax1.grid(True, alpha=0.3)
+    
+    if current_pos is not None:
+        ax1.plot(current_pos[0], current_pos[1], 'go', markersize=8, label='Current Position')
+        
+        target_s = (current_s + lookahead_distance) % s[-1]
+        lookahead_idx = np.argmin(np.abs(s - target_s))
+        lookahead_pos = track[lookahead_idx]
+        
+        ax1.plot(lookahead_pos[0], lookahead_pos[1], 'ro', markersize=8, label='Lookahead Position')
+        ax1.legend()
+    
+    ax2.plot(s, kappa, 'b-', alpha=0.7, linewidth=2, label='Original Curvature')
+    ax2.plot(s_lookup, kappa_lookup, 'r--', alpha=0.8, linewidth=1, label='Lookup Points')
+    
+    if current_s is not None:
+        current_kappa = np.interp(current_s, s, kappa)
+        ax2.axvline(x=current_s, color='green', linestyle='-', alpha=0.8, label='Current s')
+        ax2.plot(current_s, current_kappa, 'go', markersize=8)
+        
+        target_s = (current_s + lookahead_distance) % s[-1]
+        lookahead_kappa = np.interp(target_s, s, kappa)
+        ax2.axvline(x=target_s, color='red', linestyle='-', alpha=0.8, label='Lookahead s')
+        ax2.plot(target_s, lookahead_kappa, 'ro', markersize=8)
+        
+        lookup_idx = int(target_s * (len(s_lookup) / s[-1])) % len(s_lookup)
+        used_kappa = kappa_lookup[lookup_idx]
+        ax2.plot(target_s, used_kappa, 'rx', markersize=12, markeredgewidth=2, label='Used Curvature')
+    
+    ax2.set_xlabel('Track Length (s)')
+    ax2.set_ylabel('Curvature (kappa)')
+    ax2.set_title('Curvature Profile with Lookahead')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    if current_s is not None:
+        print(f"Current s: {current_s:.1f}")
+        print(f"Lookahead s: {target_s:.1f}")
+        print(f"Actual curvature at lookahead: {lookahead_kappa:.4f}")
+        print(f"Lookup curvature used: {used_kappa:.4f}")
+        print(f"Error: {abs(lookahead_kappa - used_kappa):.4f}")
+
+def plot_results(results):
+    plt.figure(figsize=(10, 4))
+    plt.subplot(1, 2, 1)
+    plt.plot(results["best_history"], label='Best', linewidth=2)
+    plt.plot(results["mean_history"], label='Mean', linewidth=2)
+    plt.xlabel('Generation')
+    plt.ylabel('Fitness')
+    plt.title('Evolution Progress')
+    plt.legend()
+    plt.grid(True)
+    
+    plt.subplot(1, 2, 2)
+    plt.imshow(track_mask, origin='lower')
+    if results["historical_bests"]:
+        tx = [p[0] for p in results["historical_bests"][-1]["trace"]]
+        ty = [p[1] for p in results["historical_bests"][-1]["trace"]]
+        
+        speeds = [c['speed'] for c in results["historical_bests"][-1]["controls"]]
+        
+        # colormap based on speed
+        # NOTE: we might have one less speed value than trace points
+        min_len = min(len(tx), len(speeds))
+        tx_plot = tx[:min_len]
+        ty_plot = ty[:min_len]
+        speeds_plot = speeds[:min_len]
+        
+        scatter = plt.scatter(tx_plot, ty_plot, c=speeds_plot, cmap='viridis', 
+                             s=10, alpha=0.8, label='Best Driver')
+        plt.colorbar(scatter, label='Speed')
+        
+        # we also add a line plot for the trajectory (optional, lighter)
+        plt.plot(tx, ty, 'k-', alpha=0.3, linewidth=1)
+    
+    # plt.scatter([cx], [cy], marker='x', color='cyan', s=100)
+    # tx = [p[0] for p in best_trace_overall]
+    # ty = [p[1] for p in best_trace_overall]
+    # plt.scatter(tx[-1], ty[-1], marker='o', color='green', s=50, label='End Position')
+    plt.axis('off')
+    plt.title('Best Trajectory')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # ========== HISTORICAL ANALYSIS ==========
+    historical_bests =  results["historical_bests"]
+    if historical_bests:
+        print(f"\nFound {len(historical_bests)} improvements during evolution:")
+        for i, best in enumerate(historical_bests):
+            print(f"  {i+1}. Gen {best['generation']}: {best['fitness']:.0f} fitness, {best['progress']:.1f}% progress")
+        
+        plot_improvement_timeline(historical_bests)
+        
+        plot_historical_trajectories(historical_bests, track_mask, max_display=5)
+        
+        plot_historical_speed_comparison(historical_bests, max_display=3)
+        
+        plot_historical_controls_comparison(historical_bests, max_display=3)
+    best_controls_overall = results["historical_bests"][-1]["controls"]
+    if best_controls_overall:
+        plot_controls(best_controls_overall, title="Final Best Driver Control Inputs Over Time")
 
 # ========== MAIN EVOLUTION ==========
-population = create_population(POP_SIZE)
-best_history, mean_history = [], []
-best_trace_overall = None
-best_controls_overall = None
-best_fitness_overall = -1.0
-best_genome_overall = None
-stagnation_counter = 0
-current_mutation_std = MUTATION_STD
-
-historical_bests = []  # List of (generation, fitness, genome, trace, controls)
-
-print("Starting evolution...")
-print("Gen | Best Fitness |  Progress% |  Laps | Dir | Distance | Status | MutRate")
-print("----|--------------|------------|-------|-----|----------|--------|--------")
-
-
-for gen in range(GENERATIONS):
-    fits, progress_data = evaluate_pop_fitness(population, track_mask)
-    mean_history.append(float(np.mean(fits)))
-    best_idx = int(np.argmax(fits))
-    best_val = float(fits[best_idx])
-    best_history.append(best_val)
-
-    # best individual progress info
-    best_progress, best_laps, best_direction, best_distance, best_crashed = progress_data[
-        best_idx]
-    direction_symbol = "→" if best_direction > 0 else "←"
-    status = "CRASH" if best_crashed else "OK"
-
-    # Check if new best
-    is_new_best = best_val > best_fitness_overall
-    if is_new_best:
-        best_fitness_overall = best_val
-        best_genome_overall = population[best_idx].copy()
-        _, best_trace_overall, _, _, best_controls_overall = simulate_one(best_genome_overall, track_mask,
-                                                      max_steps=1000,
-                                                      return_trace=True, return_controls=True)
-        
-        historical_bests.append({
-            'generation': gen + 1,
-            'fitness': best_val,
-            'genome': best_genome_overall.copy(),
-            'trace': best_trace_overall.copy() if best_trace_overall else None,
-            'controls': best_controls_overall.copy() if best_controls_overall else None,
-            'progress': best_progress,
-            'laps': best_laps,
-            'direction': best_direction,
-            'distance': best_distance
-        })
-        
-        new_best_marker = "NEW BEST!"
-        stagnation_counter = 0
-        current_mutation_std = MUTATION_STD
-    else:
-        stagnation_counter += 1
-        new_best_marker = ""
-
-    # adaptive mutation adjustment
-    if stagnation_counter > 0 and stagnation_counter % STAGNATION_LIMIT == 0:
-        current_mutation_std = min(MAX_MUTATION_STD, current_mutation_std + MUTATION_STEP)
-        print(f" Stagnation detected ({stagnation_counter} gens) → Mutation std increased to {current_mutation_std:.2f}")
-
-    print(
-        f"{gen + 1:3d} | {best_val:12.0f} | {best_progress:9.1f}% | {best_laps:5d} |  {direction_symbol}  | {best_distance:9.0f} | {status:5} | {current_mutation_std:.2f} {new_best_marker}"
-    )
-
-
-    new_pop = []
-
-    #  best individual
-    elite_idx = np.argsort(fits)[-1:]
-    new_pop.append(population[elite_idx[0]].copy())
-
-    # add random individuals
-    for _ in range(3):
-        new_pop.append(create_population(1)[0])
-
-    # fill rest with selection/crossover/mutation
-    while len(new_pop) < POP_SIZE:
-        p1 = tournament_select(population, fits)
-        p2 = tournament_select(population, fits)
-        c1, c2 = crossover(p1, p2)
-        c1 = mutate(c1)
-        c2 = mutate(c2)
-        new_pop.append(c1)
-        if len(new_pop) < POP_SIZE:
-            new_pop.append(c2)
-
-    population = np.vstack(new_pop)[:POP_SIZE]
-
-# ========== RESULTS ==========
-print(f"\nEvolution completed! Final best: {best_fitness_overall:.0f} fitness")
-
-if best_trace_overall:
-    progress_percent, laps_completed, direction, total_distance = calculate_net_progress(
-        best_trace_overall)
-    direction_text = "Counter-Clockwise" if direction > 0 else "Clockwise"
-    print(
-        f"Best driver: {progress_percent:.1f}% progress, {direction_text}, {total_distance:.0f} units")
-
-# ========== PLOTS ==========
-plt.figure(figsize=(10, 4))
-plt.subplot(1, 2, 1)
-plt.plot(best_history, label='Best', linewidth=2)
-plt.plot(mean_history, label='Mean', linewidth=2)
-plt.xlabel('Generation')
-plt.ylabel('Fitness')
-plt.title('Evolution Progress')
-plt.legend()
-plt.grid(True)
-
-plt.subplot(1, 2, 2)
-plt.imshow(track_mask, origin='lower')
-if best_trace_overall and best_controls_overall:
-    tx = [p[0] for p in best_trace_overall]
-    ty = [p[1] for p in best_trace_overall]
+def run_simulation(pop_size=DEFAULT_POP_SIZE, mutation_std=DEFAULT_MUTATION_STD, 
+                   crossover_rate=DEFAULT_CROSSOVER_RATE,
+                   generations=DEFAULT_GENERATIONS, tournament=DEFAULT_TOURNAMENT):
+    population = create_population(pop_size)
+    best_history, mean_history = [], []
+    best_trace_overall = None
+    best_controls_overall = None
+    best_fitness_overall = -1.0
+    best_genome_overall = None
+    stagnation_counter = 0
+    current_mutation_std = mutation_std
     
-    speeds = [c['speed'] for c in best_controls_overall]
+    historical_bests = []  # List of (generation, fitness, genome, trace, controls)
     
-    # colormap based on speed
-    # NOTE: we might have one less speed value than trace points
-    min_len = min(len(tx), len(speeds))
-    tx_plot = tx[:min_len]
-    ty_plot = ty[:min_len]
-    speeds_plot = speeds[:min_len]
+    print("Starting evolution...")
+    print("Gen | Best Fitness |  Progress% |  Laps | Dir | Distance | Status | MutRate")
+    print("----|--------------|------------|-------|-----|----------|--------|--------")
     
-    scatter = plt.scatter(tx_plot, ty_plot, c=speeds_plot, cmap='viridis', 
-                         s=10, alpha=0.8, label='Best Driver')
-    plt.colorbar(scatter, label='Speed')
+    for gen in range(generations):
+        fits, progress_data = evaluate_pop_fitness(population, track_mask)
+        mean_history.append(float(np.mean(fits)))
+        best_idx = int(np.argmax(fits))
+        best_val = float(fits[best_idx])
+        best_history.append(best_val)
     
-    # we also add a line plot for the trajectory (optional, lighter)
-    plt.plot(tx, ty, 'k-', alpha=0.3, linewidth=1)
+        # best individual progress info
+        best_progress, best_laps, best_direction, best_distance, best_crashed = progress_data[
+            best_idx]
+        direction_symbol = "→" if best_direction > 0 else "←"
+        status = "CRASH" if best_crashed else "OK"
+    
+        # Check if new best
+        is_new_best = best_val > best_fitness_overall
+        if is_new_best:
+            best_fitness_overall = best_val
+            best_genome_overall = population[best_idx].copy()
+            _, best_trace_overall, _, _, best_controls_overall = simulate_one(best_genome_overall, track_mask,
+                                                                               track, kappa, s,
+                                                          max_steps=1000,
+                                                          return_trace=True, return_controls=True)
+            
+            historical_bests.append({
+                'generation': gen + 1,
+                'fitness': best_val,
+                'genome': best_genome_overall.copy(),
+                'trace': best_trace_overall.copy() if best_trace_overall else None,
+                'controls': best_controls_overall.copy() if best_controls_overall else None,
+                'progress': best_progress,
+                'laps': best_laps,
+                'direction': best_direction,
+                'distance': best_distance
+            })
+            
+            new_best_marker = "NEW BEST!"
+            stagnation_counter = 0
+            current_mutation_std = mutation_std
+        else:
+            stagnation_counter += 1
+            new_best_marker = ""
+    
+        # adaptive mutation adjustment
+        if stagnation_counter > 0 and stagnation_counter % STAGNATION_LIMIT == 0:
+            current_mutation_std = min(MAX_MUTATION_STD, current_mutation_std + MUTATION_STEP)
+            print(f" Stagnation detected ({stagnation_counter} gens) → Mutation std increased to {current_mutation_std:.2f}")
+    
+        print(
+            f"{gen + 1:3d} | {best_val:12.0f} | {best_progress:9.1f}% | {best_laps:5d} |  {direction_symbol}  | {best_distance:9.0f} | {status:5} | {current_mutation_std:.2f} {new_best_marker}"
+        )
+    
+        new_pop = []
+    
+        #  best individual
+        elite_idx = np.argsort(fits)[-1:]
+        new_pop.append(population[elite_idx[0]].copy())
+    
+        # add random individuals
+        for _ in range(3):
+            new_pop.append(create_population(1)[0])
+    
+        # fill rest with selection/crossover/mutation
+        while len(new_pop) < pop_size:
+            p1 = tournament_select(population, fits, k=tournament)
+            p2 = tournament_select(population, fits, k=tournament)
+            c1, c2 = crossover(p1, p2)
+            c1 = mutate(c1, current_mutation_std)
+            c2 = mutate(c2, current_mutation_std)
+            new_pop.append(c1)
+            if len(new_pop) < pop_size:
+                new_pop.append(c2)
+    
+        population = np.vstack(new_pop)[:pop_size]
+    
+    # ========== RESULTS ==========
+    print(f"\nEvolution completed! Final best: {best_fitness_overall:.0f} fitness")
+    
+    if best_trace_overall:
+        progress_percent, laps_completed, direction, total_distance = calculate_net_progress(
+            best_trace_overall)
+        direction_text = "Counter-Clockwise" if direction > 0 else "Clockwise"
+        print(
+            f"Best driver: {progress_percent:.1f}% progress, {direction_text}, {total_distance:.0f} units")
+    results = {
+        "best_history":best_history,
+        "mean_history":mean_history,
+        "historical_bests": historical_bests
+    }
+    return results
 
-elif best_trace_overall:
-    # if we dont have speed data, just plot the trajectory line
-    tx = [p[0] for p in best_trace_overall]
-    ty = [p[1] for p in best_trace_overall]
-    plt.plot(tx, ty, 'r-', linewidth=2, label='Best Driver')
+# ========== CREATE A TRACK ==========
+LOOKUP_TABLE_POINTS = 1000
+track_mask, track,  kappa,s = create_track(wiggles=4, amp=0.2, width=20, W=400, H=200, semi_ax_x=140, semi_ax_y=65)
 
-plt.scatter([cx], [cy], marker='x', color='cyan', s=100)
-if best_trace_overall:
-    tx = [p[0] for p in best_trace_overall]
-    ty = [p[1] for p in best_trace_overall]
-    plt.scatter(tx[-1], ty[-1], marker='o', color='green', s=50, label='End Position')
-plt.axis('off')
-plt.title('Best Trajectory')
-plt.legend()
+s_lookup, kappa_lookup = create_fast_lookup(track, kappa, s, LOOKUP_TABLE_POINTS)
 
-plt.tight_layout()
-plt.show()
+conversion_factor = LOOKUP_TABLE_POINTS / s[-1]  # points per meter
+verify_lookup_creation(track, kappa, s, s_lookup, kappa_lookup)
 
-# ========== HISTORICAL ANALYSIS ==========
-if historical_bests:
-    print(f"\nFound {len(historical_bests)} improvements during evolution:")
-    for i, best in enumerate(historical_bests):
-        print(f"  {i+1}. Gen {best['generation']}: {best['fitness']:.0f} fitness, {best['progress']:.1f}% progress")
-    
-    plot_improvement_timeline(historical_bests)
-    
-    plot_historical_trajectories(historical_bests, track_mask, max_display=5)
-    
-    plot_historical_speed_comparison(historical_bests, max_display=3)
-    
-    plot_historical_controls_comparison(historical_bests, max_display=3)
+USE_ADAPTIVE_CURVATURE_LOOKUP = True # see curvature ahead, based on current velocity
 
-if best_controls_overall:
-    plot_controls(best_controls_overall, title="Final Best Driver Control Inputs Over Time")
+# GA parameters
+POP_SIZE = 40 # drivers in each generation
+GENERATIONS = 100 # total number of generations to simulate
+TOURNAMENT = 5 # selected k for tournament selection
+CROSSOVER_RATE = 0.7 # probability of crossover between parents
+MUTATION_STD = 0.2 # range of mutation randomness
+MUTATION_STEP = 0.1 # increase mutation step on stagnation
+STAGNATION_LIMIT = 10 # increase mutation std when no new best occurs
+MAX_MUTATION_STD = 1
+
+results = run_simulation(pop_size=POP_SIZE, mutation_std=MUTATION_STD, crossover_rate=CROSSOVER_RATE,generations=GENERATIONS, tournament=TOURNAMENT)
